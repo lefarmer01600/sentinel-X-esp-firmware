@@ -13,7 +13,14 @@ public:
     ledcAttachPin(_pin, _chan);
     silence();
 
-    // POST /buzzer  state=on|off  [freq=1000..4000]
+    // Commands coming from the FastAPI backend over WebSocket
+    net.onBackendMessage = [this](const char* payload, size_t len) {
+      JsonDocument doc;
+      if (deserializeJson(doc, payload, len)) return;
+      applyState(doc);
+    };
+
+    // --- local HTTP routes (debug) ---
     net.http.on("/buzzer", HTTP_POST, [this, &net]() {
       if (net.http.hasArg("freq")) {
         int f = net.http.arg("freq").toInt();
@@ -32,39 +39,11 @@ public:
         net.http.send(400, "application/json", "{\"error\":\"state or freq required\"}");
         return;
       } else if (_on) {
-        tone(_freq);            // freq only: retune while playing
+        tone(_freq);
       }
       net.http.send(200, "application/json", status());
     });
 
-    // POST /melody  (JSON body)
-    // {"steps":[{"f":440,"d":200},{"f":0,"d":100},{"f":880,"d":300}],"repeat":1}
-    //   f = frequency in Hz (0 = pause), d = duration in ms
-    //   repeat = number of plays (0 = loop forever)
-    net.http.on("/melody", HTTP_POST, [this, &net]() {
-      JsonDocument doc;
-      if (deserializeJson(doc, net.http.arg("plain"))) {
-        net.http.send(400, "application/json", "{\"error\":\"invalid json\"}");
-        return;
-      }
-      JsonArray steps = doc["steps"];
-      if (steps.isNull() || steps.size() == 0 || steps.size() > MAX_STEPS) {
-        net.http.send(400, "application/json",
-          String("{\"error\":\"steps required, max ") + MAX_STEPS + "\"}");
-        return;
-      }
-      _count = 0;
-      for (JsonObject s : steps) {
-        _steps[_count].f = s["f"] | 0;
-        _steps[_count].d = s["d"] | 100;
-        _count++;
-      }
-      _repeat = doc["repeat"] | 1;
-      startMelody();
-      net.http.send(200, "application/json", status());
-    });
-
-    // POST /melody/stop
     net.http.on("/melody/stop", HTTP_POST, [this, &net]() {
       stopMelody();
       silence();
@@ -88,7 +67,7 @@ public:
     playStep();
   }
 
-  // --- public API for other modules (e.g. alarm when IR detects something) ---
+  // --- public API for other modules ---
   void setFreq(int f) { _freq = f; if (_on && !_playing) tone(_freq); }
   void on()           { stopMelody(); tone(_freq); }
   void off()          { stopMelody(); silence(); }
@@ -96,7 +75,50 @@ public:
 
 private:
   struct Step { uint16_t f; uint16_t d; };
-  static const int MAX_STEPS = 4096;
+  static const int MAX_STEPS = 512;   // 4096 * 4 bytes = 16 KB of RAM; 512 is plenty
+
+  // Backend state: {"buzzer":"on|off","freq":2000,"melody":{...}|null,"melody_id":N}
+  void applyState(JsonDocument& doc) {
+    int f = doc["freq"] | _freq;
+    if (f >= 20 && f <= 20000) _freq = f;
+
+    // 1) New melody (melody_id changed)
+    int mid = doc["melody_id"] | 0;
+    if (mid != _lastMelodyId) {
+      _lastMelodyId = mid;
+      JsonObject m = doc["melody"];
+      if (!m.isNull() && loadMelody(m)) {
+        startMelody();
+        return;
+      }
+    }
+
+    // 2) Melody cancelled by the backend (melody=null)
+    bool melodyNull = doc["melody"].isNull();
+    const char* b = doc["buzzer"] | "off";
+
+    if (_playing) {
+      if (melodyNull) { stopMelody(); silence(); }   // backend sent "off"
+      return;                                         // otherwise let the melody finish
+    }
+
+    // 3) Plain on/off + freq
+    if (strcmp(b, "on") == 0) tone(_freq);
+    else                      silence();
+  }
+
+  bool loadMelody(JsonObject m) {
+    JsonArray steps = m["steps"];
+    if (steps.isNull() || steps.size() == 0 || steps.size() > MAX_STEPS) return false;
+    _count = 0;
+    for (JsonObject s : steps) {
+      _steps[_count].f = s["f"] | 0;
+      _steps[_count].d = s["d"] | 100;
+      _count++;
+    }
+    _repeat = m["repeat"] | 1;
+    return true;
+  }
 
   void tone(int f)  { _on = true;  ledcWriteTone(_chan, f); }
   void silence()    { _on = false; ledcWriteTone(_chan, 0); }
@@ -127,4 +149,5 @@ private:
   int  _count = 0, _idx = 0, _repeat = 1, _played = 0;
   bool _playing = false;
   unsigned long _stepStart = 0;
+  int  _lastMelodyId = 0;
 };
