@@ -75,7 +75,7 @@ public:
 
 private:
   struct Step { uint16_t f; uint16_t d; };
-  static const int MAX_STEPS = 512;   // 4096 * 4 bytes = 16 KB of RAM; 512 is plenty
+  static const int MAX_STEPS = 4096;   // 4096 * 4 bytes = 16 KB of RAM; 512 is plenty
 
   // Backend state: {"buzzer":"on|off","freq":2000,"melody":{...}|null,"melody_id":N}
   void applyState(JsonDocument& doc) {
